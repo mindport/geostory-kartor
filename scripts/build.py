@@ -31,6 +31,10 @@ sheets = json.loads(os.environ["SHEETS"])
 report = []
 
 
+# gdal2tiles is "gdal2tiles.py" in Ubuntu's GDAL package and "gdal2tiles" in Homebrew's.
+GDAL2TILES = shutil.which("gdal2tiles") or shutil.which("gdal2tiles.py") or "gdal2tiles.py"
+
+
 def run(*args):
     subprocess.run(args, check=True, stdout=subprocess.DEVNULL)
 
@@ -80,7 +84,7 @@ def build(s):
         run("gdalwarp", "-q", "-overwrite", "-t_srs", "EPSG:3857", "-r", "bilinear", "-order", "1", "-dstalpha", "-co", "COMPRESS=DEFLATE", gcp, warped)
         os.remove(gcp)
         blocks = os.path.join(work, "blocks")
-        run("gdal2tiles", "--xyz", "-z", "6-14", "--tilesize=1024", "-r", "bilinear", "-w", "none", "--tiledriver=WEBP",
+        run(GDAL2TILES, "--xyz", "-z", "6-14", "--tilesize=1024", "-r", "bilinear", "-w", "none", "--tiledriver=WEBP",
             "--webp-quality=75", "--processes=2", "-q", warped, blocks)
         zpath = os.path.join(work, "blocks.zip")
         n = 0
@@ -104,6 +108,8 @@ def build(s):
         return "failed: upload answered %s %s" % (code, body[:200])
     except subprocess.CalledProcessError as e:
         return "failed: %s" % " ".join(str(a) for a in e.cmd[:2])
+    except Exception as e:
+        return "failed: %s" % e
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
