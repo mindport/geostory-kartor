@@ -1,0 +1,76 @@
+name: Häradsekonomiska kartan till geostory.se
+
+# Lägger Lantmäteriets Häradsekonomiska kartan (1859–1934, öppna data CC0) på plats och laddar upp den till GeoStory
+# som block om 1024 px (WebP), kartlagret "hek" i appens historiska karta. Se scripts/plan.py och scripts/build.py.
+# Blad som redan finns på servern hoppas över, så jobbet kan köras om tills allt är klart.
+# Hemlighet: HEK_UPLOAD_KEY (samma som GS_HEK_UPLOAD_KEY på servern).
+
+on:
+  workflow_dispatch:
+    inputs:
+      bbox:
+        description: 'Område minlat,minlon,maxlat,maxlon (hela Sverige: 55,10.5,69.5,24.5)'
+        required: true
+        default: '59.3,17.5,60.6,19.2'
+      max:
+        description: 'Högst antal blad i denna körning'
+        required: true
+        default: '60'
+      per_job:
+        description: 'Blad per jobb'
+        required: true
+        default: '6'
+
+concurrency:
+  group: hek
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: GDAL
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y gdal-bin > /dev/null
+      - name: Bladindex
+        run: |
+          set -euo pipefail
+          B="ftp://download-opendata.lantmateriet.se/Haradsekonomiska_kartan"
+          for half in sodra norra; do
+            if [ $half = sodra ]; then D="H%C3%A4radsekonomiska_Kartan_S%C3%B6dra"; F="H%C3%A4radsekonomiska_kartan_s%C3%B6dra"; else D="H%C3%A4radsekonomiska_Kartan_Norra"; F="H%C3%A4radsekonomiska_kartan_norra"; fi
+            for e in shp shx dbf prj; do curl -s -m 120 --retry 3 -o idx_$half.$e "$B/$D/$F.$e"; done
+            ogr2ogr --config SHAPE_ENCODING CP1252 -f GeoJSON -t_srs EPSG:4326 idx_${half}_4326.json idx_$half.shp
+            ogr2ogr --config SHAPE_ENCODING CP1252 -f GeoJSON idx_${half}_3006.json idx_$half.shp
+          done
+      - name: Plan
+        id: plan
+        env:
+          HEK_UPLOAD_KEY: ${{ secrets.HEK_UPLOAD_KEY }}
+        run: |
+          set -euo pipefail
+          curl -s -m 60 --retry 3 -H "X-GS-Key: $HEK_UPLOAD_KEY" "https://www.geostory.se/api/histupload.php?list=1" > done.json
+          python3 scripts/plan.py "${{ inputs.bbox }}" "${{ inputs.max }}" "${{ inputs.per_job }}" done.json > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "count=$(python3 -c 'import json;print(len(json.load(open("matrix.json"))["include"]))')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: GDAL
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y gdal-bin python3-gdal > /dev/null
+      - name: Bygg och ladda upp
+        env:
+          HEK_UPLOAD_KEY: ${{ secrets.HEK_UPLOAD_KEY }}
+          SHEETS: ${{ matrix.sheets }}
+        run: python3 scripts/build.py
