@@ -25,6 +25,7 @@ FTP = "ftp://download-opendata.lantmateriet.se/Haradsekonomiska_kartan/"
 HALF = {"sodra": "Häradsekonomiska_Kartan_Södra", "norra": "Häradsekonomiska_Kartan_Norra"}
 UPLOAD = "https://www.geostory.se/api/histupload.php"
 MAX_SHAPE_DIFF = 0.03
+PART = 120
 
 key = os.environ["HEK_UPLOAD_KEY"]
 sheets = json.loads(os.environ["SHEETS"])
@@ -86,26 +87,36 @@ def build(s):
         blocks = os.path.join(work, "blocks")
         run(GDAL2TILES, "--xyz", "-z", "6-14", "--tilesize=1024", "-r", "bilinear", "-w", "none", "--tiledriver=WEBP",
             "--webp-quality=75", "--processes=2", "-q", warped, blocks)
-        zpath = os.path.join(work, "blocks.zip")
-        n = 0
-        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as zf:
-            for root, _, files in os.walk(blocks):
-                for f in files:
-                    if f.endswith(".webp"):
-                        zt, x = root.split(os.sep)[-2:]
-                        zf.write(os.path.join(root, f), "%d/b4/%s_%s" % (int(zt) + 2, x, f))
-                        n += 1
+        files = []
+        for root, _, names in os.walk(blocks):
+            for f in names:
+                if f.endswith(".webp"):
+                    zt, x = root.split(os.sep)[-2:]
+                    files.append((os.path.join(root, f), "%d/b4/%s_%s" % (int(zt) + 2, x, f)))
+        # High zoom first, low zoom last: the low levels are shared with the neighbouring sheets and laid on top of
+        # them on the server, which takes longest. Small parts, so each request stays well inside the server's time.
+        files.sort(key=lambda t: -int(t[1].split("/")[0]))
         meta = json.dumps({"l": "hek", "id": sid, "name": s["name"], "years": s["years"], "poly": s["ring4326"]}, ensure_ascii=False)
-        size = os.path.getsize(zpath)
-        for attempt in range(1, 6):
-            r = subprocess.run(["curl", "-s", "-m", "300", "-w", "\n%{http_code}", "-H", "X-GS-Key: " + key,
-                                "-F", "zip=@" + zpath, "-F", "sheet=" + meta, UPLOAD], capture_output=True, text=True)
-            body, _, code = r.stdout.rpartition("\n")
-            if code == "200":
-                return "ok: %d blocks, %.1f MB, %s" % (n, size / 1e6, body.strip())
-            # one.com answers 429 to many requests in a row from one address: wait and try again.
-            time.sleep(10 * attempt)
-        return "failed: upload answered %s %s" % (code, body[:200])
+        total = 0
+        parts = [files[i:i + PART] for i in range(0, len(files), PART)]
+        for k, part in enumerate(parts):
+            zpath = os.path.join(work, "part%d.zip" % k)
+            with zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED) as zf:
+                for src_file, name in part:
+                    zf.write(src_file, name)
+            total += os.path.getsize(zpath)
+            code, body = "", ""
+            for attempt in range(1, 6):
+                r = subprocess.run(["curl", "-s", "-m", "240", "-w", "\n%{http_code}", "-H", "X-GS-Key: " + key,
+                                    "-F", "zip=@" + zpath, "-F", "sheet=" + meta, UPLOAD], capture_output=True, text=True)
+                body, _, code = r.stdout.rpartition("\n")
+                if code == "200":
+                    break
+                # one.com answers 429 to many requests in a row from one address: wait and try again.
+                time.sleep(10 * attempt)
+            if code != "200":
+                return "failed: upload part %d/%d answered %s %s" % (k + 1, len(parts), code, body[:200])
+        return "ok: %d blocks in %d parts, %.1f MB, %s" % (len(files), len(parts), total / 1e6, body.strip())
     except subprocess.CalledProcessError as e:
         return "failed: %s" % " ".join(str(a) for a in e.cmd[:2])
     except Exception as e:
