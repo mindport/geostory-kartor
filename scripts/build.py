@@ -52,6 +52,27 @@ def corners(ring):
     return top[0], top[1], bottom[1], bottom[0]
 
 
+def find_frame(path, white=238, frac=0.6, step=8):
+    """The map frame inside white scan margins: the first/last row and column where at least `frac` of the pixels
+    (read at 1/step size) are darker than `white`. Returns (x, y, width, height) in pixels or None."""
+    import numpy as np
+    from osgeo import gdal
+    gdal.UseExceptions()
+    ds = gdal.Open(path)
+    w, h = ds.RasterXSize, ds.RasterYSize
+    bw, bh = max(1, w // step), max(1, h // step)
+    n = min(3, ds.RasterCount)
+    lum = sum(ds.GetRasterBand(i + 1).ReadAsArray(buf_xsize=bw, buf_ysize=bh).astype(np.float32) for i in range(n)) / n
+    dark = lum < white
+    rows = np.where(dark.mean(axis=1) > frac)[0]
+    cols = np.where(dark.mean(axis=0) > frac)[0]
+    if len(rows) == 0 or len(cols) == 0:
+        return None
+    x0, x1 = int(cols[0]) * step, min(w, (int(cols[-1]) + 1) * step)
+    y0, y1 = int(rows[0]) * step, min(h, (int(rows[-1]) + 1) * step)
+    return x0, y0, x1 - x0, y1 - y0
+
+
 def dist(a, b):
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
@@ -74,6 +95,21 @@ def build(s):
         ul, ur, lr, ll = corners(s["ring3006"])
         frame = (dist(ul, ur) + dist(ll, lr)) / (dist(ul, ll) + dist(ur, lr))
         diff = abs(w / h - frame) / frame
+        cropped = ""
+        if diff > MAX_SHAPE_DIFF:
+            # 2026-10-21: many scans have a white margin around the map paper (e.g. J112-95-16 Transtrand, 6100x4804,
+            # 4.7 %). Find the map frame (rows and columns that are mostly not white) and cut the margin away.
+            f = find_frame(src)
+            if f is not None:
+                x0, y0, cw, ch = f
+                cdiff = abs(cw / ch - frame) / frame
+                if cdiff <= MAX_SHAPE_DIFF:
+                    crop = os.path.join(work, "crop.tif")
+                    run("gdal_translate", "-q", "-srcwin", str(x0), str(y0), str(cw), str(ch), src, crop)
+                    os.remove(src)
+                    src, w, h = crop, cw, ch
+                    cropped = " (margin cut: %dx%d at %d,%d, %.1f%% -> %.1f%%)" % (cw, ch, x0, y0, diff * 100, cdiff * 100)
+                    diff = cdiff
         if diff > MAX_SHAPE_DIFF:
             return "skipped: the image is %dx%d, its shape differs %.1f%% from the sheet (margins?)" % (w, h, diff * 100)
         gcp = os.path.join(work, "gcp.tif")
@@ -116,7 +152,7 @@ def build(s):
                 time.sleep(10 * attempt)
             if code != "200":
                 return "failed: upload part %d/%d answered %s %s" % (k + 1, len(parts), code, body[:200])
-        return "ok: %d blocks in %d parts, %.1f MB, %s" % (len(files), len(parts), total / 1e6, body.strip())
+        return "ok: %d blocks in %d parts, %.1f MB%s, %s" % (len(files), len(parts), total / 1e6, cropped, body.strip())
     except subprocess.CalledProcessError as e:
         return "failed: %s" % " ".join(str(a) for a in e.cmd[:2])
     except Exception as e:
