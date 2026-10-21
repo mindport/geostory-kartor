@@ -81,7 +81,8 @@ def build(s):
     sid = s["id"]
     if len(s["ring3006"]) != 4:
         return "skipped: the sheet has %d corners in the index" % len(s["ring3006"])
-    listing = subprocess.run(["curl", "-s", "-m", "60", "--list-only", ftp_url(s["half"], sid)], capture_output=True, text=True).stdout.split()
+    folder = s.get("folder", sid)
+    listing = subprocess.run(["curl", "-s", "-m", "60", "--list-only", ftp_url(s["half"], folder)], capture_output=True, text=True).stdout.split()
     tifs = [f for f in listing if f.lower().endswith(".tif")]
     if not tifs:
         return "skipped: no TIFF on the FTP"
@@ -89,7 +90,7 @@ def build(s):
     os.makedirs(work, exist_ok=True)
     try:
         src = os.path.join(work, "sheet.tif")
-        run("curl", "-s", "-m", "900", "--retry", "3", "-o", src, ftp_url(s["half"], sid, tifs[0]))
+        run("curl", "-s", "-m", "900", "--retry", "3", "-o", src, ftp_url(s["half"], folder, tifs[0]))
         info = json.loads(subprocess.run(["gdalinfo", "-json", src], capture_output=True, text=True, check=True).stdout)
         w, h = info["size"]
         ul, ur, lr, ll = corners(s["ring3006"])
@@ -132,7 +133,7 @@ def build(s):
         # High zoom first, low zoom last: the low levels are shared with the neighbouring sheets and laid on top of
         # them on the server, which takes longest. Small parts, so each request stays well inside the server's time.
         files.sort(key=lambda t: -int(t[1].split("/")[0]))
-        meta = json.dumps({"l": "hek", "id": sid, "name": s["name"], "years": s["years"], "poly": s["ring4326"]}, ensure_ascii=False)
+        meta = json.dumps({"l": s.get("layer", "hek"), "id": sid, "name": s["name"], "years": s["years"], "poly": s["ring4326"]}, ensure_ascii=False)
         total = 0
         parts = [files[i:i + PART] for i in range(0, len(files), PART)]
         for k, part in enumerate(parts):
