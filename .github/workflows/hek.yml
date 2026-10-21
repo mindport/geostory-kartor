@@ -51,7 +51,7 @@ jobs:
           HEK_UPLOAD_KEY: ${{ secrets.HEK_UPLOAD_KEY }}
         run: |
           set -euo pipefail
-          curl -s -m 60 --retry 3 -H "X-GS-Key: $HEK_UPLOAD_KEY" "https://www.geostory.se/api/histupload.php?list=1" > done.json
+          curl -s -m 120 --retry 5 --retry-delay 20 --retry-all-errors -H "X-GS-Key: $HEK_UPLOAD_KEY" "https://www.geostory.se/api/histupload.php?list=1" > done.json
           python3 scripts/plan.py "${{ inputs.bbox }}" "${{ inputs.max }}" "${{ inputs.per_job }}" done.json > matrix.json
           echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
           echo "count=$(python3 -c 'import json;print(len(json.load(open("matrix.json"))["include"]))')" >> "$GITHUB_OUTPUT"
