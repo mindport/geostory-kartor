@@ -1,0 +1,83 @@
+name: Häradsekonomiska kartan – fyll blankt papper med äldre utgåvan
+
+# Jens 2026-11-01 (GeoStory debuglogg 2026-10-31 17_20, Gottröra): på a/b-bladen är den nyare utgåvan (lagret hek)
+# blankt papper där området hörde till grannlänet, medan den äldre utgåvan (hek2) har kartan där. scripts/fill.py
+# lägger hek2 under det blanka pappret i hek-blocken och skickar dem till api/histupload.php (fill=1: blocket ersätts,
+# originalet sparas en gång i api/_cache/histtiles/hek_fillbak/). Blankt papper utan något under lämnas som det är.
+# Kan köras om: redan fyllda block har inget blankt papper kvar och hoppas över.
+# Hemlighet: HEK_UPLOAD_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: 'Bara dessa blad (komma, tomt = alla hek2-blad)'
+        required: false
+        default: ''
+      zooms:
+        description: 'Zoomnivåer'
+        required: true
+        default: '8-16'
+      dry:
+        description: '1 = räkna bara, ladda inte upp'
+        required: true
+        default: '0'
+      per_job:
+        description: 'Blad per jobb'
+        required: true
+        default: '4'
+
+concurrency:
+  group: hek
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Blad med äldre utgåva
+        id: plan
+        env:
+          HEK_UPLOAD_KEY: ${{ secrets.HEK_UPLOAD_KEY }}
+          ONLY: ${{ inputs.only }}
+          PER_JOB: ${{ inputs.per_job }}
+        run: |
+          set -euo pipefail
+          curl -s -m 120 --retry 5 --retry-delay 20 --retry-all-errors -H "X-GS-Key: $HEK_UPLOAD_KEY" "https://www.geostory.se/api/histupload.php?list=1&full=1" > sheets.json
+          python3 - <<'EOF' > matrix.json
+          import json, os
+          d = json.load(open("sheets.json"))
+          only = [s.strip() for s in os.environ.get("ONLY", "").split(",") if s.strip()]
+          sh = [{"id": s["id"], "poly": s["poly"]} for s in d.get("sheets", []) if s.get("l") == "hek2" and (not only or s["id"] in only)]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("Blad: " + ", ".join("%s %s" % (s["id"], s.get("name", "")) for s in d.get("sheets", []) if s.get("l") == "hek2" and (not only or s["id"] in only)) + "\n")
+          n = max(1, int(os.environ["PER_JOB"]))
+          print(json.dumps({"include": [{"chunk": i // n, "sheets": json.dumps(sh[i:i + n])} for i in range(0, len(sh), n)]}))
+          EOF
+          echo "Blad med äldre utgåva: $(python3 -c 'import json;print(sum(len(json.loads(m["sheets"])) for m in json.load(open("matrix.json"))["include"]))')" >> "$GITHUB_STEP_SUMMARY"
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "count=$(python3 -c 'import json;print(len(json.load(open("matrix.json"))["include"]))')" >> "$GITHUB_OUTPUT"
+
+  fill:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python
+        run: pip install -q pillow numpy scipy
+      - name: Fyll
+        env:
+          HEK_UPLOAD_KEY: ${{ secrets.HEK_UPLOAD_KEY }}
+          SHEETS: ${{ matrix.sheets }}
+          ZOOMS: ${{ inputs.zooms }}
+          DRY: ${{ inputs.dry }}
+        run: python3 scripts/fill.py
